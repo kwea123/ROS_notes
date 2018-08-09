@@ -12,3 +12,7 @@ Follow [this](https://www.youtube.com/watch?v=e0r4uKK1zkk) to visualize the imag
 ## Sending video over ROS
 
 It is faster to encode the video stream to bytes (e.g. in mjpeg), then send the bytes, instead of sending an image array.
+
+## ROS markers
+
+[Here](https://www.robotech-note.com/entry/2018/04/15/221524) is a tutorial on how to create basic markers using python.
