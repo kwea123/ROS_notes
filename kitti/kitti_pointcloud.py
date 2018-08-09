@@ -11,8 +11,8 @@ DATA_PATH = '/home/ubuntu/data/kitti/RawData/2011_09_26/2011_09_26_drive_0005_sy
 
 if __name__ == '__main__':
 	frame = 0
-	rospy.init_node('kitti_pointcloud', anonymous=True)
-	pcl_pub = rospy.Publisher("/pointcloud", PointCloud2)
+	rospy.init_node('kitti_pointcloud_node', anonymous=True)
+	pcl_pub = rospy.Publisher("kitti_pointcloud", PointCloud2, queue_size=10)
 	rate = rospy.Rate(10)
 
 	while not rospy.is_shutdown():
@@ -23,7 +23,7 @@ if __name__ == '__main__':
 		
 		#create pcl from points
 		points = np.fromfile(DATA_PATH+'%010d.bin'%frame, dtype=np.float32).reshape(-1, 4)
-		# if we want the intensity		
+		# if we want the intensity
 		fields = [PointField('x', 0, PointField.FLOAT32, 1),
                   PointField('y', 4, PointField.FLOAT32, 1),
                   PointField('z', 8, PointField.FLOAT32, 1),
