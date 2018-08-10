@@ -21,3 +21,8 @@ It is faster to encode the video stream to bytes (e.g. in mjpeg), then send the 
 
 Use `chrony` to synchronize across machines.
 [tutorial](https://qiita.com/ngkazu/items/916f476985fa3e3f2951)
+
+
+## ROS with Gazebo
+
+[Installation](http://gazebosim.org/tutorials?tut=ros_installing)
