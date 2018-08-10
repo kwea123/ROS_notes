@@ -16,3 +16,8 @@ It is faster to encode the video stream to bytes (e.g. in mjpeg), then send the 
 ## ROS markers
 
 [Here](https://www.robotech-note.com/entry/2018/04/15/221524) is a tutorial on how to create basic markers using python.
+
+## ROS synchronization
+
+Use `chrony` to synchronize across machines.
+[tutorial](https://qiita.com/ngkazu/items/916f476985fa3e3f2951)
