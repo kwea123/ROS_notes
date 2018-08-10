@@ -26,3 +26,5 @@ Use `chrony` to synchronize across machines.
 ## ROS with Gazebo
 
 [Installation](http://gazebosim.org/tutorials?tut=ros_installing)
+
+[Problem1](http://answers.gazebosim.org/question/14237/problem-with-launching-the-gazebo/)
