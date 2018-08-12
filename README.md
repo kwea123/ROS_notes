@@ -34,3 +34,4 @@ Use `chrony` to synchronize across machines.
 [1](http://r17u.hatenablog.com/entry/2017/06/11/213942)
 [2](http://wiki.ros.org/turtlebot_gazebo/Tutorials/indigo/Make%20a%20map%20and%20navigate%20with%20it)
 [3](http://learn.turtlebot.com/2015/02/03/6/)
+[4](http://robot.isc.chubu.ac.jp/?p=969)
