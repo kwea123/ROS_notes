@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from sensor_msgs.msg import PointCloud2, Image
+from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 import rospy
 
