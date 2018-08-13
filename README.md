@@ -35,3 +35,7 @@ Use `chrony` to synchronize across machines.
 [2](http://wiki.ros.org/turtlebot_gazebo/Tutorials/indigo/Make%20a%20map%20and%20navigate%20with%20it)
 [3](http://learn.turtlebot.com/2015/02/03/6/)
 [4](http://robot.isc.chubu.ac.jp/?p=969)
+
+## How to deal with coordinate transformation
+
+[here](https://www.google.com/search?client=ubuntu&hs=FKF&channel=fs&ei=hIBxW7PWMqqr6ATz37XwDA&q=rosrun+tf+tf_echo&oq=rosrun+tf+tf&gs_l=psy-ab.3.0.0i203k1j0i30k1l2j0i10i30k1.786572.788454.0.789443.12.12.0.0.0.0.197.1101.10j2.12.0....0...1c.1.64.psy-ab..0.12.1101...0j0i67k1j35i39k1j0i10k1j0i8i30k1.0.xvwVv5VFlDY)
