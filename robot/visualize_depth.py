@@ -23,7 +23,7 @@ class Image_Subscriber():
 		cv2.waitKey(1)
 
 if __name__ == '__main__':
-	image_subscriber = Image_Subscriber()
 	rospy.init_node('depth_image_listener', anonymous=True)
+	image_subscriber = Image_Subscriber()
 	rospy.spin()
 	cv2.destroyAllWindows()
