@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import time
 import cv2
+import numpy as np
 
 import rospy
 from visualization_msgs.msg import Marker, MarkerArray
@@ -11,13 +12,16 @@ import std_msgs.msg
 from cv_bridge import CvBridge, CvBridgeError
 import tf as ros_tf # ROS transformation library
 
+from processing_utils import *
+
 LINES = [[0, 1], [1, 2], [2, 3], [3, 0]] # lower face
 LINES+= [[4, 5], [5, 6], [6, 7], [7, 4]] # upper face
 LINES+= [[4, 0], [5, 1], [6, 2], [7, 3]] # connect lower face and upper face
 LINES+= [[4, 1], [5, 0]] # front face
 
 FRAME_ID = "map" # the base coordinate name in rviz
-LIFETIME = 0.1 # 1/rate
+RATE = 10
+LIFETIME = 1.0/RATE # 1/rate
 
 DETECTION_COLOR_MAP = {'Car': (255,255,0), 'Pedestrian': (0, 226, 255), 'Cyclist': (141, 40, 255)} # color for detection, in format bgr
 
@@ -43,7 +47,7 @@ def publish_camera(cam_pub, bridge, image, borders_2d_cam2s=None, object_types=N
     if log:
         rospy.loginfo("camera image published")
 
-def publish_3dbox(markers_pub, corners_3d_velos, track_ids, object_types=None, publish_id=True, log=False):
+def publish_3dbox(box3d_pub, corners_3d_velos, track_ids, object_types=None, publish_id=True, publish_distance=False, log=False):
     """
     Publish 3d boxes in velodyne coordinate, with color specified by object_types
     If object_types is None, set all color to cyan
@@ -117,11 +121,47 @@ def publish_3dbox(markers_pub, corners_3d_velos, track_ids, object_types=None, p
             text_marker.color.a = 1.0
             marker_array.markers.append(text_marker)
 
-    markers_pub.publish(marker_array)
+        if publish_distance:
+            text_marker = Marker()
+            text_marker.header.frame_id = FRAME_ID
+            text_marker.header.stamp = rospy.Time.now()
+
+            text_marker.id = track_id + 2000
+            text_marker.action = Marker.ADD
+            text_marker.lifetime = rospy.Duration(LIFETIME)
+            text_marker.type = Marker.TEXT_VIEW_FACING
+
+            bc = (corners_3d_velo[6] + corners_3d_velo[7] + corners_3d_velo[2] + corners_3d_velo[3])/4 # back center
+
+            text_marker.pose.position.x = bc[0]
+            text_marker.pose.position.y = bc[1]
+            text_marker.pose.position.z = bc[2]
+
+            bcu = (corners_3d_velo[6][:3]+corners_3d_velo[7][:3])/2
+            bcu[0] -= 3.07 # the length of the head of the car
+            distance = np.sqrt(np.sum(bcu**2))
+            text_marker.text = '%.2f'%distance
+
+            text_marker.scale.x = 1
+            text_marker.scale.y = 1
+            text_marker.scale.z = 1
+
+            if distance<4:
+                text_marker.color.r = 1.0
+                text_marker.color.g = 0.0
+                text_marker.color.b = 0.0
+            else:
+                text_marker.color.r = 0.0
+                text_marker.color.g = 1.0
+                text_marker.color.b = 0.5
+            text_marker.color.a = 1.0
+            marker_array.markers.append(text_marker)
+
+    box3d_pub.publish(marker_array)
     if log:
         rospy.loginfo("%d 3d boxes published"%len(corners_3d_velos))
 
-def publish_car_fov(marker_pub):
+def publish_car_fov(fov_pub):
     """
     Publish left and right 45 degree FOV lines
     """
@@ -144,7 +184,7 @@ def publish_car_fov(marker_pub):
     marker.points.append(Point(10, -10, 0))
     marker.points.append(Point(0, 0, 0))
     marker.points.append(Point(10, 10, 0))
-    marker_pub.publish(marker)
+    fov_pub.publish(marker)
 
 def publish_point_cloud(pcl_pub, point_cloud, format='xyz', log=False):
     """
@@ -223,12 +263,14 @@ def publish_gps(gps_pub, gps_data, log=False):
     if log:
         rospy.loginfo("gps msg published")
 
-def publish_location(loc_pub, points, log=False):
+def publish_location(loc_pub, locations, velocities, publish_velocity=False, log=False):
+    marker_array = MarkerArray()
+
     marker = Marker()
     marker.header.frame_id = FRAME_ID
     marker.header.stamp = rospy.Time.now()
 
-    #marker.id = i-10
+    # marker.id = -1
     marker.action = Marker.ADD
     marker.lifetime = rospy.Duration()
     marker.type = Marker.LINE_STRIP
@@ -240,9 +282,98 @@ def publish_location(loc_pub, points, log=False):
     marker.scale.x = 0.2
 
     marker.points = []
-    for p in points:
+    for p in locations:
         marker.points.append(Point(p[0], p[1], 0))
 
-    loc_pub.publish(marker)
+    marker_array.markers.append(marker)
+
+    if publish_velocity and len(velocities)>0:
+        text_marker = Marker()
+        text_marker.header.frame_id = FRAME_ID
+        text_marker.header.stamp = rospy.Time.now()
+
+        text_marker.id = -2
+        text_marker.action = Marker.ADD
+        text_marker.lifetime = rospy.Duration(LIFETIME)
+        text_marker.type = Marker.TEXT_VIEW_FACING
+
+        text_marker.pose.position.x = 0
+        text_marker.pose.position.y = 0
+        text_marker.pose.position.z = 0.5
+
+        velocity = velocities[0]
+        velocity *= 3.6 # convert to kph
+        text_marker.text = '%.1f'%velocity
+
+        text_marker.scale.x = 1
+        text_marker.scale.y = 1
+        text_marker.scale.z = 1
+
+        text_marker.color.r = 0.0
+        text_marker.color.g = 1.0
+        text_marker.color.b = 0.8
+        text_marker.color.a = 1.0
+        marker_array.markers.append(text_marker)
+
+    loc_pub.publish(marker_array)
     if log:
         rospy.loginfo("locations published")
+
+def publish_trajectory(tracker_pub, trajectories_dictonary, velocities_dictonary, publish_velocity=False, log=False):
+    marker_array = MarkerArray()
+
+    for track_id in trajectories_dictonary:
+        marker = Marker()
+        marker.header.frame_id = FRAME_ID
+        marker.header.stamp = rospy.Time.now()
+
+        marker.id = track_id + 10000
+        marker.action = Marker.ADD
+        marker.lifetime = rospy.Duration(LIFETIME)
+        marker.type = Marker.LINE_STRIP
+
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 0.8
+        marker.scale.x = 0.1
+
+        marker.points = []
+        for p in trajectories_dictonary[track_id]:
+            marker.points.append(Point(p[0], p[1], 0))
+
+        marker_array.markers.append(marker)
+
+        if publish_velocity and len(trajectories_dictonary[track_id]) > 1:
+            text_marker = Marker()
+            text_marker.header.frame_id = FRAME_ID
+            text_marker.header.stamp = rospy.Time.now()
+
+            text_marker.id = track_id + 20000
+            text_marker.action = Marker.ADD
+            text_marker.lifetime = rospy.Duration(LIFETIME)
+            text_marker.type = Marker.TEXT_VIEW_FACING
+
+            p = trajectories_dictonary[track_id][0]
+
+            text_marker.pose.position.x = p[0]
+            text_marker.pose.position.y = p[1]
+            text_marker.pose.position.z = 0.5
+
+            velocity = velocities_dictonary[track_id][0]
+            velocity *= 3.6 # convert to kph
+            text_marker.text = '%.1f'%velocity
+
+            text_marker.scale.x = 1
+            text_marker.scale.y = 1
+            text_marker.scale.z = 1
+
+            text_marker.color.r = 0.0
+            text_marker.color.g = 1.0
+            text_marker.color.b = 0.8
+            text_marker.color.a = 1.0
+            marker_array.markers.append(text_marker)
+
+    tracker_pub.publish(marker_array)
+    if log:
+        rospy.loginfo("trajectories published")

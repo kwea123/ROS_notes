@@ -4,6 +4,8 @@ import yaml
 import os
 import struct
 import time
+from collections import defaultdict, deque
+import cPickle as pickle
 
 import rospy
 
@@ -30,6 +32,9 @@ def cam2_3d_to_velo(corners_3d_cam2):
     Return : 4xn in velo coordinate
     """
     return np.linalg.inv(Tr_velo_to_cam2).dot(np.r_[corners_3d_cam2, np.ones((1, 8))])
+
+def compute_center_of_box(corners_3d_velo):
+    return np.mean(corners_3d_velo, axis=0)
 
 def in_hull(p, hull):
     from scipy.spatial import Delaunay
@@ -63,9 +68,9 @@ def compute_great_circle_distance(lat1, lon1, lat2, lon2):
     return 6371000.0 * np.arccos(delta_sigma)
 
 
-DATA_PATH = '/home/ubuntu/data/kitti/RawData/2011_09_26/2011_09_26_drive_0014_sync/'
+DATA_PATH = '/home/ubuntu/data/kitti/RawData/2011_10_03/2011_10_03_drive_0047_sync/'
 
-with open('/home/ubuntu/data/kitti/RawData/2011_09_26/calib_velo_to_cam.txt', 'r') as f:
+with open('/home/ubuntu/data/kitti/RawData/2011_10_03/calib_velo_to_cam.txt', 'r') as f:
     yml = yaml.load(f)
 
 R_velo_to_cam2 = np.array([float(i) for i in yml['R'].split(' ')]).reshape(3, 3)
@@ -76,62 +81,151 @@ RANDOM_COLORS = [np.random.randint(255, size=3) for _ in range(1000)]
 COLOR_WHITE = rgb_to_float32(255, 255, 255)
 
 class Localizer():
-    def __init__(self, loc_pub, max_length=20, log=False):
+    def __init__(self, loc_pub, max_length=2000, velocity_smoothing=True, log=False):
+        max_length = max(max_length, WINDOW_SIZE) # to be able to smooth
         self.loc_pub = loc_pub
         self.prev_imu_data = None
-        self.prev_locations = []
-        self.max_length = max_length
+        self.locations = deque(maxlen=max_length)
+        self.velocities = deque(maxlen=max_length)
+        self.velocity_smoothing = velocity_smoothing
+        self.velocities_smoothed = deque(maxlen=max_length)
         self.log = log
 
     def update(self, imu_data):
         if self.prev_imu_data is not None:
-            displacement = (compute_great_circle_distance(self.prev_imu_data.lat, self.prev_imu_data.lon,
-                                                               imu_data.lat, imu_data.lon))
-            yaw = (imu_data.yaw - self.prev_imu_data.yaw)
+            displacement = compute_great_circle_distance(self.prev_imu_data.lat, self.prev_imu_data.lon,
+                                                         imu_data.lat, imu_data.lon)
+            yaw = float(imu_data.yaw - self.prev_imu_data.yaw)
             
             # R = np.array([[np.cos(yaw), np.sin(yaw)], [-np.sin(yaw), np.cos(yaw)]]) # 2x2 rotation matrix of -yaw
-            for i in range(len(self.prev_locations)):
-                loc = self.prev_locations[i]
+            for i in range(len(self.locations)):
+                loc = self.locations[i]
                 newlocx = np.cos(yaw) * loc[0] + np.sin(yaw) * loc[1] - displacement
                 newlocy = -np.sin(yaw)* loc[0] + np.cos(yaw) * loc[1]
-                self.prev_locations[i] = [newlocx, newlocy]
+                self.locations[i] = np.array([newlocx, newlocy])
 
-        self.prev_locations = [[0, 0]] + self.prev_locations
-        if len(self.prev_locations) > self.max_length:
-            self.prev_locations = self.prev_locations[:self.max_length]
+        self.locations.appendleft(np.zeros(2))
+        if len(self.locations) > 1:
+            self.velocities.appendleft(np.linalg.norm(self.locations[0]-self.locations[1]) * RATE)
+            if self.velocity_smoothing:
+                if len(self.velocities) > 1:
+                    smooth_size = min(WINDOW_SIZE, len(self.velocities))
+                    self.velocities_smoothed.appendleft(hamming_smoothing(np.array(self.velocities)[:smooth_size], smooth_size)[0])
+                else:
+                    self.velocities_smoothed.appendleft(self.velocities[0])
         self.prev_imu_data = imu_data
 
     def reset(self):
         """
-        Empty the locations when the sequence has reached the end
+        Empty the data when the sequence has reached the end
         """
         self.prev_imu_data = None
-        self.prev_locations[:] = []
+        self.locations.clear()
+        self.velocities.clear()
+        self.velocities_smoothed.clear()
 
-    def publish(self):
-        publish_location(self.loc_pub, self.prev_locations, log=self.log)
+    def publish(self, publish_velocity=False):
+        if self.velocity_smoothing:
+            publish_location(self.loc_pub, self.locations, self.velocities_smoothed, publish_velocity=publish_velocity, log=self.log)
+        else:
+            publish_location(self.loc_pub, self.locations, self.velocities, publish_velocity=publish_velocity, log=self.log)
+
+    def save(self):
+        with open('locations.pickle', 'wb') as f:
+            pickle.dump(self.locations, f)
+        with open('v.pickle', 'wb') as f:
+            pickle.dump(self.velocities_smoothed, f)
+
+class Tracker():
+    def __init__(self, tracker_pub, max_length=20, velocity_smoothing=True, log=False):
+        max_length = max(max_length, WINDOW_SIZE) # to be able to smooth
+        self.tracker_pub = tracker_pub
+        self.max_length = max_length
+        self.prev_imu_data = None
+        self.trajectories_dictonary = defaultdict(deque)
+        self.velocities_dictonary = defaultdict(deque)
+        self.velocities_smoothed_dictonary = defaultdict(deque)
+        self.velocity_smoothing = velocity_smoothing
+        self.log = log
+
+    def update(self, imu_data, track_ids, centers):
+        if self.prev_imu_data is None:
+            for track_id, center in zip(track_ids, centers):
+                self.trajectories_dictonary[track_id] = deque(maxlen=self.max_length)
+                self.velocities_dictonary[track_id] = deque(maxlen=self.max_length)
+                self.velocities_smoothed_dictonary[track_id] = deque(maxlen=self.max_length)
+                self.trajectories_dictonary[track_id].appendleft(center)
+        else:
+            displacement = compute_great_circle_distance(self.prev_imu_data.lat, self.prev_imu_data.lon,
+                                                         imu_data.lat, imu_data.lon)
+            yaw = float(imu_data.yaw - self.prev_imu_data.yaw)
+            for track_id, center in zip(track_ids, centers):
+                if len(self.trajectories_dictonary[track_id]) == 0:
+                    self.trajectories_dictonary[track_id] = deque(maxlen=self.max_length)
+                else:
+                    for i in range(len(self.trajectories_dictonary[track_id])):
+                        x0, y0 = self.trajectories_dictonary[track_id][i]
+                        x1 = x0 * np.cos(yaw) + y0 * np.sin(yaw) - displacement
+                        y1 = -x0 * np.sin(yaw) + y0 * np.cos(yaw)
+                        self.trajectories_dictonary[track_id][i] = (x1, y1)
+                self.trajectories_dictonary[track_id].appendleft(center)
+
+                if len(self.trajectories_dictonary[track_id]) > 1:
+                    self.velocities_dictonary[track_id].appendleft(np.linalg.norm(self.trajectories_dictonary[track_id][0] - \
+                                                                                  self.trajectories_dictonary[track_id][1]) * RATE)
+                    if self.velocity_smoothing:
+                        if len(self.velocities_dictonary[track_id]) > 1:
+                            smooth_size = min(WINDOW_SIZE, len(self.velocities_dictonary[track_id]))
+                            self.velocities_smoothed_dictonary[track_id].appendleft(
+                                hamming_smoothing(np.array(self.velocities_dictonary[track_id])[:smooth_size], smooth_size)[0])
+                        else:
+                            self.velocities_smoothed_dictonary[track_id].appendleft(self.velocities_dictonary[track_id][0])
+
+            for track_id in self.trajectories_dictonary:
+                if track_id not in track_ids and len(self.trajectories_dictonary[track_id]) > 0: # delete objects that disappear instantly (need to modify later)
+                    self.trajectories_dictonary[track_id].clear()
+
+        self.prev_imu_data = imu_data
+
+    def reset(self):
+        self.prev_imu_data = None
+        self.trajectories_dictonary.clear()
+        self.velocities_dictonary.clear()
+        self.velocities_smoothed_dictonary.clear()
+
+    def publish(self, publish_velocity=False):
+        if self.velocity_smoothing:
+            publish_trajectory(self.tracker_pub, self.trajectories_dictonary, self.velocities_smoothed_dictonary, 
+                               publish_velocity=publish_velocity, log=self.log)
+        else:
+            publish_trajectory(self.tracker_pub, self.trajectories_dictonary, self.velocities_dictonary, publish_velocity=publish_velocity, 
+                               log=self.log)
 
 if __name__ == '__main__':
 
-    frame = 0
     log = True # log info to the console or not
     # create node and publishers
     rospy.init_node('kitti_pointcloud_node', anonymous=True)
     cam_pub = rospy.Publisher('kitti_cam', Image, queue_size=10)
+    cam_gt_pub = rospy.Publisher('kitti_cam_gt', Image, queue_size=10)
     bridge = CvBridge()
     pcl_pub = rospy.Publisher('kitti_pointcloud', PointCloud2, queue_size=10)
-    marker_pub = rospy.Publisher('kitti_carFOV', Marker, queue_size=10)
-    markers_pub = rospy.Publisher('kitti_3dboxes', MarkerArray, queue_size=10)
+    fov_pub = rospy.Publisher('kitti_carFOV', Marker, queue_size=10)
+    box3d_pub = rospy.Publisher('kitti_3dboxes', MarkerArray, queue_size=10)
     imu_pub = rospy.Publisher('kitti_imu', Imu, queue_size=10)
     gps_pub = rospy.Publisher('kitti_gps', NavSatFix, queue_size=10)
-    loc_pub = rospy.Publisher('kitti_loc', Marker, queue_size=10)
+    loc_pub = rospy.Publisher('kitti_loc', MarkerArray, queue_size=10)
+    tracker_pub = rospy.Publisher('kitti_trajectories', MarkerArray, queue_size=10)
     rate = rospy.Rate(10)
 
-    df_tracking = read_tracking('/home/ubuntu/data/kitti/tracking/training/label_02/0004.txt')
-    sequence_length = max(df_tracking['frame'])
-    
-    localizer = Localizer(loc_pub)
+    df_tracking = read_tracking('/home/ubuntu/data/kitti/tracking/training/label_02/0020.txt')
+    sequence_length = 837
 
+    localizer = Localizer(loc_pub)
+    tracker = Tracker(tracker_pub, log=log)
+
+    # start publishing
+    frame = 0
     while not rospy.is_shutdown():
 
         # read camera data of the current frame
@@ -147,7 +241,7 @@ if __name__ == '__main__':
         # read point cloud of the current frame
         point_cloud = read_velodyne(os.path.join(DATA_PATH, 'velodyne_points/data/%010d.bin'%frame))
         # downsample the point cloud
-        point_cloud = point_cloud[::2]
+        point_cloud = point_cloud[::3]
         # set default point cloud color to white
         point_cloud[:, 3] = COLOR_WHITE
 
@@ -155,6 +249,8 @@ if __name__ == '__main__':
         borders_2d_cam2s = []
         object_types = []
         corners_3d_velos = []
+        centers = []
+        track_ids = np.array(df_tracking_frame['track_id'])
         for i in range(len(df_tracking_frame)):
 
             borders_2d_cam2 = np.array(df_tracking_frame.loc[i, ['bbox_left', 'bbox_top', 'bbox_right', 'bbox_bottom']])
@@ -164,6 +260,7 @@ if __name__ == '__main__':
             corners_3d_cam2 = compute_3d_box_cam2(*np.array(df_tracking_frame.loc[i, ['height', 'width', 'length', 'pos_x', 'pos_y', 'pos_z', 'rot_y']]))
             corners_3d_velo = cam2_3d_to_velo(corners_3d_cam2).T # 8x4
             corners_3d_velos += [corners_3d_velo]
+            centers += [compute_center_of_box(corners_3d_velo)[:2]]
             
             # # set different color for point cloud in each object (slow)
             # box3droi_pc_velo, box3d_roi_inds = extract_pc_in_box3d(point_cloud, corners_3d_velo[:, :3])
@@ -171,26 +268,35 @@ if __name__ == '__main__':
 
         # update the localizer
         localizer.update(df_imu_frame)
+        # update the tracker
+        tracker.update(df_imu_frame, track_ids, centers)
 
         # publish location
-        localizer.publish()
+        localizer.publish(publish_velocity=True)
+        # publish trajectories
+        tracker.publish(publish_velocity=True)
         # publish camera image
-        publish_camera(cam_pub, bridge, image, borders_2d_cam2s, object_types, log=log)
+        publish_camera(cam_pub, bridge, image, log=log)
+        # publish 2d gt
+        publish_camera(cam_gt_pub, bridge, image, borders_2d_cam2s, object_types, log=log)
         # publish point cloud
         publish_point_cloud(pcl_pub, point_cloud, format='xyzrgb', log=log)
         # publish 3d boxes
-        publish_3dbox(markers_pub, corners_3d_velos, np.array(df_tracking_frame['track_id']), object_types, publish_id=True, log=log)
+        publish_3dbox(box3d_pub, corners_3d_velos, track_ids, object_types, publish_id=False, publish_distance=False, log=log)
         # # publish imu
         # publish_imu(imu_pub, df_imu_frame, log=log)
         # # publish gps
         # publish_gps(gps_pub, df_imu_frame, log=log)
         # publish car FOV
-        publish_car_fov(marker_pub)
+        publish_car_fov(fov_pub)
 
         frame += 1
         if frame == sequence_length: # if the sequence has reached the end
             frame = 0
+            # localizer.save()
             localizer.reset()
+            tracker.reset()
             rospy.loginfo("sequence reset !")
+            # break
 
         rate.sleep()
