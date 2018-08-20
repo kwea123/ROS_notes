@@ -81,7 +81,7 @@ RANDOM_COLORS = [np.random.randint(255, size=3) for _ in range(1000)]
 COLOR_WHITE = rgb_to_float32(255, 255, 255)
 
 class Localizer():
-    def __init__(self, loc_pub, max_length=2000, velocity_smoothing=True, log=False):
+    def __init__(self, loc_pub, max_length=20, velocity_smoothing=True, log=False):
         max_length = max(max_length, WINDOW_SIZE) # to be able to smooth
         self.loc_pub = loc_pub
         self.prev_imu_data = None
@@ -167,7 +167,7 @@ class Tracker():
                         x0, y0 = self.trajectories_dictonary[track_id][i]
                         x1 = x0 * np.cos(yaw) + y0 * np.sin(yaw) - displacement
                         y1 = -x0 * np.sin(yaw) + y0 * np.cos(yaw)
-                        self.trajectories_dictonary[track_id][i] = (x1, y1)
+                        self.trajectories_dictonary[track_id][i] = np.array([x1, y1])
                 self.trajectories_dictonary[track_id].appendleft(center)
 
                 if len(self.trajectories_dictonary[track_id]) > 1:
@@ -210,7 +210,7 @@ if __name__ == '__main__':
     cam_gt_pub = rospy.Publisher('kitti_cam_gt', Image, queue_size=10)
     bridge = CvBridge()
     pcl_pub = rospy.Publisher('kitti_pointcloud', PointCloud2, queue_size=10)
-    fov_pub = rospy.Publisher('kitti_carFOV', Marker, queue_size=10)
+    ego_car_pub = rospy.Publisher('kitti_ego_car', MarkerArray, queue_size=10)
     box3d_pub = rospy.Publisher('kitti_3dboxes', MarkerArray, queue_size=10)
     imu_pub = rospy.Publisher('kitti_imu', Imu, queue_size=10)
     gps_pub = rospy.Publisher('kitti_gps', NavSatFix, queue_size=10)
@@ -275,8 +275,8 @@ if __name__ == '__main__':
         localizer.publish(publish_velocity=True)
         # publish trajectories
         tracker.publish(publish_velocity=True)
-        # publish camera image
-        publish_camera(cam_pub, bridge, image, log=log)
+        # # publish camera image
+        # publish_camera(cam_pub, bridge, image, log=log)
         # publish 2d gt
         publish_camera(cam_gt_pub, bridge, image, borders_2d_cam2s, object_types, log=log)
         # publish point cloud
@@ -287,8 +287,8 @@ if __name__ == '__main__':
         # publish_imu(imu_pub, df_imu_frame, log=log)
         # # publish gps
         # publish_gps(gps_pub, df_imu_frame, log=log)
-        # publish car FOV
-        publish_car_fov(fov_pub)
+        # publish car FOV and mesh
+        publish_ego_car(ego_car_pub)
 
         frame += 1
         if frame == sequence_length: # if the sequence has reached the end
