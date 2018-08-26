@@ -4,13 +4,14 @@ import yaml
 import os
 import struct
 import time
-from collections import defaultdict, deque
+from collections import deque
 import cPickle as pickle
 
 import rospy
 
 from publish_utils import *
 from kitti_data_utils import *
+from processing_utils import *
 
 def compute_3d_box_cam2(h, w, l, x, y, z, yaw):
     """
@@ -38,13 +39,13 @@ def compute_center_of_box(corners_3d_velo):
 
 def in_hull(p, hull):
     from scipy.spatial import Delaunay
-    if not isinstance(hull,Delaunay):
+    if not isinstance(hull, Delaunay):
         hull = Delaunay(hull)
     return hull.find_simplex(p)>=0
 
 def extract_pc_in_box3d(pc, box3d):
     ''' pc: (N,3+), box3d: (8,3+) '''
-    box3d_roi_inds = in_hull(pc[:,:3], box3d)
+    box3d_roi_inds = in_hull(pc[:, :3], box3d)
     return pc[box3d_roi_inds], box3d_roi_inds
 
 def rgb_to_float32(r, g, b):
@@ -68,9 +69,9 @@ def compute_great_circle_distance(lat1, lon1, lat2, lon2):
     return 6371000.0 * np.arccos(delta_sigma)
 
 
-DATA_PATH = '/home/ubuntu/data/kitti/RawData/2011_09_26/2011_09_26_drive_0005_sync/'
+DATA_PATH = '/home/ubuntu/data/kitti/RawData/2011_09_29/2011_09_29_drive_0071_sync/'
 
-with open('/home/ubuntu/data/kitti/RawData/2011_09_26/calib_velo_to_cam.txt', 'r') as f:
+with open('/home/ubuntu/data/kitti/RawData/2011_09_29/calib_velo_to_cam.txt', 'r') as f:
     yml = yaml.load(f)
 
 R_velo_to_cam2 = np.array([float(i) for i in yml['R'].split(' ')]).reshape(3, 3)
@@ -80,15 +81,48 @@ Tr_velo_to_cam2 = np.vstack((np.hstack([R_velo_to_cam2, T_velo_to_cam2]), [0, 0,
 RANDOM_COLORS = [np.random.randint(255, size=3) for _ in range(1000)]
 COLOR_WHITE = rgb_to_float32(255, 255, 255)
 
+class Object():
+    def __init__(self, center, max_length, velocity_smoothing):
+        self.locations = deque(maxlen=max_length)
+        self.locations.appendleft(center)
+        self.velocities = deque(maxlen=max_length)
+        self.max_length = max_length
+        self.velocity_smoothing = velocity_smoothing
+
+        if velocity_smoothing:
+            self.velocities_smoothed = deque(maxlen=max_length)
+
+    def update(self, center, displacement, yaw):
+        """
+        Update the center of the object, and calculates the velocity
+        """
+        for i in range(len(self.locations)):
+            x0, y0 = self.locations[i]
+            x1 = x0 * np.cos(yaw) + y0 * np.sin(yaw) - displacement
+            y1 = -x0 * np.sin(yaw) + y0 * np.cos(yaw)
+            self.locations[i] = np.array([x1, y1])
+        self.locations.appendleft(center)
+
+        if len(self.locations) > 1:
+            self.velocities.appendleft(np.linalg.norm(self.locations[0]-self.locations[1]) * RATE)
+            if self.velocity_smoothing:
+                if len(self.velocities) > 1: # if there's enough data to smooth
+                    smooth_size = min(WINDOW_SIZE, len(self.velocities))
+                    self.velocities_smoothed.appendleft(hamming_smoothing(np.array(self.velocities)[:smooth_size], smooth_size)[0])
+                else:
+                    self.velocities_smoothed.appendleft(self.velocities[0])
+
+    def is_full(self):
+        return len(self.locations) >= self.max_length//2
+
 class Localizer():
     def __init__(self, loc_pub, max_length=20, velocity_smoothing=True, log=False):
         max_length = max(max_length, WINDOW_SIZE) # to be able to smooth
         self.loc_pub = loc_pub
         self.prev_imu_data = None
-        self.locations = deque(maxlen=max_length)
-        self.velocities = deque(maxlen=max_length)
         self.velocity_smoothing = velocity_smoothing
-        self.velocities_smoothed = deque(maxlen=max_length)
+        self.max_length = max_length
+        self.ego_car = Object([0, 0], max_length=self.max_length, velocity_smoothing=self.velocity_smoothing)
         self.log = log
 
     def update(self, imu_data):
@@ -96,23 +130,7 @@ class Localizer():
             displacement = compute_great_circle_distance(self.prev_imu_data.lat, self.prev_imu_data.lon,
                                                          imu_data.lat, imu_data.lon)
             yaw = float(imu_data.yaw - self.prev_imu_data.yaw)
-            
-            # R = np.array([[np.cos(yaw), np.sin(yaw)], [-np.sin(yaw), np.cos(yaw)]]) # 2x2 rotation matrix of -yaw
-            for i in range(len(self.locations)):
-                loc = self.locations[i]
-                newlocx = np.cos(yaw) * loc[0] + np.sin(yaw) * loc[1] - displacement
-                newlocy = -np.sin(yaw)* loc[0] + np.cos(yaw) * loc[1]
-                self.locations[i] = np.array([newlocx, newlocy])
-
-        self.locations.appendleft(np.zeros(2))
-        if len(self.locations) > 1:
-            self.velocities.appendleft(np.linalg.norm(self.locations[0]-self.locations[1]) * RATE)
-            if self.velocity_smoothing:
-                if len(self.velocities) > 1:
-                    smooth_size = min(WINDOW_SIZE, len(self.velocities))
-                    self.velocities_smoothed.appendleft(hamming_smoothing(np.array(self.velocities)[:smooth_size], smooth_size)[0])
-                else:
-                    self.velocities_smoothed.appendleft(self.velocities[0])
+            self.ego_car.update([0, 0], displacement, yaw)
         self.prev_imu_data = imu_data
 
     def reset(self):
@@ -120,15 +138,13 @@ class Localizer():
         Empty the data when the sequence has reached the end
         """
         self.prev_imu_data = None
-        self.locations.clear()
-        self.velocities.clear()
-        self.velocities_smoothed.clear()
+        self.ego_car = Object([0, 0], max_length=self.max_length, velocity_smoothing=self.velocity_smoothing)
 
     def publish(self, publish_velocity=False):
         if self.velocity_smoothing:
-            publish_location(self.loc_pub, self.locations, self.velocities_smoothed, publish_velocity=publish_velocity, log=self.log)
+            publish_location(self.loc_pub, self.ego_car.locations, self.ego_car.velocities_smoothed, publish_velocity=publish_velocity, log=self.log)
         else:
-            publish_location(self.loc_pub, self.locations, self.velocities, publish_velocity=publish_velocity, log=self.log)
+            publish_location(self.loc_pub, self.ego_car.locations, self.ego_car.velocities, publish_velocity=publish_velocity, log=self.log)
 
     def save(self):
         with open('locations.pickle', 'wb') as f:
@@ -142,68 +158,48 @@ class Tracker():
         self.tracker_pub = tracker_pub
         self.max_length = max_length
         self.prev_imu_data = None
-        self.trajectories_dictonary = defaultdict(deque)
-        self.velocities_dictonary = defaultdict(deque)
-        self.velocities_smoothed_dictonary = defaultdict(deque)
+        self.objects_to_track = {}
         self.velocity_smoothing = velocity_smoothing
         self.log = log
 
     def update(self, imu_data, track_ids, centers):
-        if self.prev_imu_data is None:
+        if self.prev_imu_data is None: # if it's the very first frame
             for track_id, center in zip(track_ids, centers):
-                self.trajectories_dictonary[track_id] = deque(maxlen=self.max_length)
-                self.velocities_dictonary[track_id] = deque(maxlen=self.max_length)
-                self.velocities_smoothed_dictonary[track_id] = deque(maxlen=self.max_length)
-                self.trajectories_dictonary[track_id].appendleft(center)
+                self.objects_to_track[track_id] = Object(center, max_length=self.max_length, velocity_smoothing=self.velocity_smoothing)
         else:
             displacement = compute_great_circle_distance(self.prev_imu_data.lat, self.prev_imu_data.lon,
                                                          imu_data.lat, imu_data.lon)
             yaw = float(imu_data.yaw - self.prev_imu_data.yaw)
             for track_id, center in zip(track_ids, centers):
-                if len(self.trajectories_dictonary[track_id]) == 0:
-                    self.trajectories_dictonary[track_id] = deque(maxlen=self.max_length)
+                if track_id not in self.objects_to_track: # if it's a new object
+                    self.objects_to_track[track_id] = Object(center, max_length=self.max_length, velocity_smoothing=self.velocity_smoothing)
                 else:
-                    for i in range(len(self.trajectories_dictonary[track_id])):
-                        x0, y0 = self.trajectories_dictonary[track_id][i]
-                        x1 = x0 * np.cos(yaw) + y0 * np.sin(yaw) - displacement
-                        y1 = -x0 * np.sin(yaw) + y0 * np.cos(yaw)
-                        self.trajectories_dictonary[track_id][i] = np.array([x1, y1])
-                self.trajectories_dictonary[track_id].appendleft(center)
+                    self.objects_to_track[track_id].update(center, displacement, yaw)
 
-                if len(self.trajectories_dictonary[track_id]) > 1:
-                    self.velocities_dictonary[track_id].appendleft(np.linalg.norm(self.trajectories_dictonary[track_id][0] - \
-                                                                                  self.trajectories_dictonary[track_id][1]) * RATE)
-                    if self.velocity_smoothing:
-                        if len(self.velocities_dictonary[track_id]) > 1:
-                            smooth_size = min(WINDOW_SIZE, len(self.velocities_dictonary[track_id]))
-                            self.velocities_smoothed_dictonary[track_id].appendleft(
-                                hamming_smoothing(np.array(self.velocities_dictonary[track_id])[:smooth_size], smooth_size)[0])
-                        else:
-                            self.velocities_smoothed_dictonary[track_id].appendleft(self.velocities_dictonary[track_id][0])
-
-            for track_id in self.trajectories_dictonary:
-                if track_id not in track_ids and len(self.trajectories_dictonary[track_id]) > 0: # delete objects that disappear instantly (need to modify later)
-                    self.trajectories_dictonary[track_id].clear()
+            # delete objects that disappear instantly (need to modify later)
+            track_ids_to_delete = []
+            for track_id in self.objects_to_track:
+                if track_id not in track_ids:
+                    track_ids_to_delete += [track_id]
+            for track_id in track_ids_to_delete:
+                self.objects_to_track.pop(track_id)
 
         self.prev_imu_data = imu_data
 
     def reset(self):
         self.prev_imu_data = None
-        self.trajectories_dictonary.clear()
-        self.velocities_dictonary.clear()
-        self.velocities_smoothed_dictonary.clear()
+        self.objects_to_track.clear()
 
     def publish(self, publish_velocity=False):
-        if self.velocity_smoothing:
-            publish_trajectory(self.tracker_pub, self.trajectories_dictonary, self.velocities_smoothed_dictonary, 
-                               publish_velocity=publish_velocity, log=self.log)
-        else:
-            publish_trajectory(self.tracker_pub, self.trajectories_dictonary, self.velocities_dictonary, publish_velocity=publish_velocity, 
-                               log=self.log)
+        publish_trajectory(self.tracker_pub, self.objects_to_track, publish_velocity=publish_velocity, 
+                           velocity_smoothing=self.velocity_smoothing, log=self.log)
+    def save(self):
+        with open('locations_others.pickle', 'wb') as f:
+            pickle.dump(self.objects_to_track[0].locations, f)
 
 if __name__ == '__main__':
 
-    log = True # log info to the console or not
+    log = False # log info to the console or not
     # create node and publishers
     rospy.init_node('kitti_pointcloud_node', anonymous=True)
     cam_pub = rospy.Publisher('kitti_cam', Image, queue_size=10)
@@ -218,8 +214,8 @@ if __name__ == '__main__':
     tracker_pub = rospy.Publisher('kitti_trajectories', MarkerArray, queue_size=10)
     rate = rospy.Rate(10)
 
-    df_tracking = read_tracking('/home/ubuntu/data/kitti/tracking/training/label_02/0000.txt')
-    sequence_length = 154
+    df_tracking = read_tracking('/home/ubuntu/data/kitti/tracking/training/label_02/0019.txt')
+    sequence_length = 1059
 
     localizer = Localizer(loc_pub)
     tracker = Tracker(tracker_pub, log=log)

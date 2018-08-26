@@ -202,7 +202,7 @@ def publish_ego_car(ego_car_pub):
     mesh_marker.pose.position.y = 0.0
     mesh_marker.pose.position.z = -1.73
 
-    q = ros_tf.transformations.quaternion_from_euler(np.pi/2, 0, np.pi);
+    q = ros_tf.transformations.quaternion_from_euler(np.pi/2, 0, np.pi)
     mesh_marker.pose.orientation.x = q[0]
     mesh_marker.pose.orientation.y = q[1]
     mesh_marker.pose.orientation.z = q[2]
@@ -354,10 +354,10 @@ def publish_location(loc_pub, locations, velocities, publish_velocity=False, log
     if log:
         rospy.loginfo("locations published")
 
-def publish_trajectory(tracker_pub, trajectories_dictonary, velocities_dictonary, publish_velocity=False, log=False):
+def publish_trajectory(tracker_pub, objects_to_track, publish_velocity=False, velocity_smoothing=False, log=False):
     marker_array = MarkerArray()
 
-    for track_id in trajectories_dictonary:
+    for track_id in objects_to_track: # for each object
         marker = Marker()
         marker.header.frame_id = FRAME_ID
         marker.header.stamp = rospy.Time.now()
@@ -374,40 +374,101 @@ def publish_trajectory(tracker_pub, trajectories_dictonary, velocities_dictonary
         marker.scale.x = 0.1
 
         marker.points = []
-        for p in trajectories_dictonary[track_id]:
+        for p in objects_to_track[track_id].locations:
             marker.points.append(Point(p[0], p[1], 0))
 
         marker_array.markers.append(marker)
 
-        if publish_velocity and len(trajectories_dictonary[track_id]) > 1:
-            text_marker = Marker()
-            text_marker.header.frame_id = FRAME_ID
-            text_marker.header.stamp = rospy.Time.now()
+        # draw tangent
+        if objects_to_track[track_id].is_full() and np.asarray(objects_to_track[track_id].velocities)[:RATE].mean() > 1:
+            points_prediction, tangent_angle = circle_fitting(np.array(objects_to_track[track_id].locations))
 
-            text_marker.id = track_id + 20000
-            text_marker.action = Marker.ADD
-            text_marker.lifetime = rospy.Duration(LIFETIME)
-            text_marker.type = Marker.TEXT_VIEW_FACING
+            marker = Marker()
+            marker.header.frame_id = FRAME_ID
+            marker.header.stamp = rospy.Time.now()
 
-            p = trajectories_dictonary[track_id][0]
+            marker.id = track_id + 40000
+            marker.action = Marker.ADD
+            marker.lifetime = rospy.Duration(LIFETIME)
+            marker.type = Marker.LINE_STRIP
 
-            text_marker.pose.position.x = p[0]
-            text_marker.pose.position.y = p[1]
-            text_marker.pose.position.z = 0.5
+            marker.color.r = 1.0
+            marker.color.g = 165/255.0
+            marker.color.b = 0.0
+            marker.color.a = 1.0
+            marker.scale.x = 0.1
 
-            velocity = velocities_dictonary[track_id][0]
-            velocity *= 3.6 # convert to kph
-            text_marker.text = '%.1f'%velocity
+            marker.points = []
+            for p in points_prediction:
+                marker.points.append(Point(p[0], p[1], 0))
 
-            text_marker.scale.x = 1
-            text_marker.scale.y = 1
-            text_marker.scale.z = 1
+            marker_array.markers.append(marker)
 
-            text_marker.color.r = 0.0
-            text_marker.color.g = 1.0
-            text_marker.color.b = 0.8
-            text_marker.color.a = 1.0
-            marker_array.markers.append(text_marker)
+            arrow_marker = Marker() 
+            arrow_marker.header.frame_id = FRAME_ID
+            arrow_marker.header.stamp = rospy.Time.now()
+
+            arrow_marker.id = track_id + 20000
+            arrow_marker.action = Marker.ADD
+            arrow_marker.lifetime = rospy.Duration(LIFETIME)
+            arrow_marker.type = Marker.ARROW
+
+            arrow_marker.color.r = 1.0
+            arrow_marker.color.g = 165/255.0
+            arrow_marker.color.b = 0.0
+            arrow_marker.color.a = 1.0
+
+            arrow_marker.pose.position.x = points_prediction[-1][0]
+            arrow_marker.pose.position.y = points_prediction[-1][1]
+            arrow_marker.pose.position.z = 0.0
+
+            q = ros_tf.transformations.quaternion_from_euler(0, 0, tangent_angle)
+
+            arrow_marker.pose.orientation.x = q[0]
+            arrow_marker.pose.orientation.y = q[1]
+            arrow_marker.pose.orientation.z = q[2]
+            arrow_marker.pose.orientation.w = q[3]
+
+            recent_mean_velocity = np.asarray(objects_to_track[track_id].velocities)[:RATE].mean()
+            arrow_marker.scale.x = recent_mean_velocity * 0.5
+            arrow_marker.scale.y = 0.2
+            arrow_marker.scale.z = 0.2
+
+            marker_array.markers.append(arrow_marker)
+
+        if publish_velocity:
+            if len(objects_to_track[track_id].velocities) > 0: # if it appears more than two (consecutive) frames
+                text_marker = Marker()
+                text_marker.header.frame_id = FRAME_ID
+                text_marker.header.stamp = rospy.Time.now()
+
+                text_marker.id = track_id + 30000
+                text_marker.action = Marker.ADD
+                text_marker.lifetime = rospy.Duration(LIFETIME)
+                text_marker.type = Marker.TEXT_VIEW_FACING
+
+                p = objects_to_track[track_id].locations[0]
+
+                text_marker.pose.position.x = p[0]
+                text_marker.pose.position.y = p[1]
+                text_marker.pose.position.z = 0.5
+
+                if velocity_smoothing:
+                    velocity = objects_to_track[track_id].velocities_smoothed[0]
+                else:
+                    velocity = objects_to_track[track_id].velocities[0]
+                velocity *= 3.6 # convert to kph
+                text_marker.text = '%.1f'%velocity
+
+                text_marker.scale.x = 1
+                text_marker.scale.y = 1
+                text_marker.scale.z = 1
+
+                text_marker.color.r = 0.0
+                text_marker.color.g = 1.0
+                text_marker.color.b = 0.8
+                text_marker.color.a = 1.0
+                marker_array.markers.append(text_marker)
 
     tracker_pub.publish(marker_array)
     if log:
