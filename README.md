@@ -1,6 +1,6 @@
 # ROS_notes
 
-## Use ROS to visualize kitti data
+## Use ROS to visualize KITTI data
 
 First install [kitti2bag](https://github.com/tomas789/kitti2bag).
 Follow the construction to create a rosbag.
